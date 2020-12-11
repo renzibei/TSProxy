@@ -1,5 +1,7 @@
 #include "constants.h"
+
 #include <uuid/uuid.h>
+#include <string.h>
 
 static int hasParsedKey = 0;
 static uuid_t storedId;

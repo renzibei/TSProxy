@@ -4,7 +4,9 @@
 #include <sys/types.h>
 #include "loghelper.h"
 #include <stdint.h>
+#include <arpa/inet.h>
 #include "constants.h"
+
 
 ssize_t readNBytes(int fd, void *buf, size_t nbyte);
 ssize_t writeNBytes(int fd, const void *buf, size_t nbyte);
