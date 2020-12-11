@@ -1,0 +1,8 @@
+.DS_Store
+.vscode/
+*.o
+main
+client
+server
+*.dSYM
+
