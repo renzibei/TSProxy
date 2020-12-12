@@ -28,6 +28,8 @@ namespace constants {
     const int serverNonBlocking = 1;
     const int clientNonBlocking = 1;
 
+    const int ConnectNeedBlock = -17;
+
     const uint8_t SocksVersion = 0x5;
 
     const int SocksMaxMethods = 0xff;

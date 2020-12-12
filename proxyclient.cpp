@@ -15,6 +15,8 @@
 #include <unistd.h>
 #include <assert.h>
 
+#include <unordered_map>
+
 
 using namespace constants;
 
@@ -23,6 +25,14 @@ struct ClientContext {
     ClientContext(uint64_t cSeq, uint64_t sSeq): cSeq(cSeq), sSeq(sSeq) {}
     ClientContext(): cSeq(0), sSeq(0) {}
 
+};
+
+typedef std::unordered_map<int, int> LocalFdMap; 
+
+enum LocalFdStatus{
+    LocalFdUninitialized = 0,
+    LocalFdWaiting = 1,
+    LocalFdPrepared = 2
 };
 
 ssize_t clientHandleShake(ClientContext *ctx) {
@@ -34,13 +44,13 @@ ssize_t clientHandleShake(ClientContext *ctx) {
     innerMsg.sSeq = 0;
     innerMsg.msgType = 1;
     innerMsg.dataLength = 0;
-    ssize_t sendCode = sendTSPacket(SocketPlugin::getInstance()->getSockFd(), &innerMsg);
+    ssize_t sendCode = sendTSPacket(SocketPlugin::getInstance()->getSockFd(), &innerMsg, constants::clientNonBlocking);
     if (sendCode < 0) {
         LogHelper::log(Error, "client handle shake failed, fail to send first packet");
         return sendCode;
     }
     memset(&innerMsg, 0, sizeof(innerMsg));
-    ssize_t recvCode = recvTSPacket(SocketPlugin::getInstance()->getSockFd(), &innerMsg);
+    ssize_t recvCode = recvTSPacket(SocketPlugin::getInstance()->getSockFd(), &innerMsg, constants::clientNonBlocking);
     if (recvCode < 0) {
         LogHelper::log(Error, "client handle failed, fail to recv second packet");
     }
@@ -56,7 +66,7 @@ ssize_t clientHandleShake(ClientContext *ctx) {
     // innerMsg.sSeq;
     innerMsg.msgType = 3;
     innerMsg.dataLength = 0;
-    sendCode = sendTSPacket(SocketPlugin::getInstance()->getSockFd(), &innerMsg);
+    sendCode = sendTSPacket(SocketPlugin::getInstance()->getSockFd(), &innerMsg, constants::clientNonBlocking);
     if (sendCode < 0) {
         LogHelper::log(Error, "client handle shake failed, fail to send third packet");
         return sendCode;
@@ -81,7 +91,7 @@ ssize_t sendMessage(int sockFd, const uint8_t *src, size_t nbyte, ClientContext 
     }
     innerMsg.dataLength = nbyte;
     memcpy(innerMsg.data, src, nbyte);
-    ssize_t sendCode = sendTSPacket(sockFd, &innerMsg);
+    ssize_t sendCode = sendTSPacket(sockFd, &innerMsg, constants::serverNonBlocking);
     if (sendCode < 0) {
         LogHelper::log(Error, "Fail to send data");
         return sendCode;
@@ -106,11 +116,11 @@ ssize_t sendRequestMsg(int serverFd, int localFd, const uint8_t *src, size_t nby
     return 0;
 }
 
-ssize_t recvMessage(int sockFd, uint8_t *dst, size_t bufferSize, ClientContext *ctx, int msgType = 5) {
+ssize_t recvMessage(int sockFd, uint8_t *dst, size_t bufferSize, ClientContext *ctx, uint8_t *msgTypePtr = NULL) {
     static InnerMsg innerMsg;
     memset(&innerMsg, 0, sizeof(innerMsg));
 
-    ssize_t recvCode = recvTSPacket(sockFd, &innerMsg);
+    ssize_t recvCode = recvTSPacket(sockFd, &innerMsg, constants::serverNonBlocking);
     if (recvCode < 0) {
         LogHelper::log(Error, "Fail to recv data");
         return recvCode;
@@ -119,10 +129,12 @@ ssize_t recvMessage(int sockFd, uint8_t *dst, size_t bufferSize, ClientContext *
         LogHelper::log(Error, "Fail to recv data, seq error, sSeq: %llu, expected: %llu", innerMsg.sSeq, ctx->sSeq + 1);
         return -2;
     }
-    if (innerMsg.msgType != msgType) {
-        LogHelper::log(Error, "Fail to recv data, msgType error, recv type :%d, expected: %d", innerMsg.msgType, msgType);
+    if (innerMsg.msgType != 5 && innerMsg.msgType != 7 && innerMsg.msgType != 9) {
+        LogHelper::log(Error, "Fail to recv data, msgType error, recv type :%d", innerMsg.msgType);
         return -3;
     }
+    if (msgTypePtr != NULL)
+        *msgTypePtr = innerMsg.msgType;
     if (innerMsg.dataLength > bufferSize) {
         LogHelper::log(Error, "Fail to recv data, bufferSize not enought, bufferSize :%lu, expected: %lu", bufferSize, innerMsg.dataLength);
         return -4;
@@ -135,7 +147,12 @@ ssize_t recvMessage(int sockFd, uint8_t *dst, size_t bufferSize, ClientContext *
 int recvReplyMsg(int serverFd, uint8_t *dst, size_t bufferSize, ClientContext *ctx, int *localFdPtr) {
     static uint8_t msgBuffer[constants::MAX_MSG_DATA_LENGTH];
     memset(msgBuffer, 0, sizeof(msgBuffer));
-    ssize_t recvCode = recvMessage(serverFd, msgBuffer, sizeof(msgBuffer), ctx, 9);
+    uint8_t msgType = 0;
+    ssize_t recvCode = recvMessage(serverFd, msgBuffer, sizeof(msgBuffer), ctx, &msgType);
+    if (msgType != 9) {
+        LogHelper::log(Error, "Failed in reply msg, error msg type, get :%d, expected: %d", msgType, 9);
+        return -3;
+    }
     if (recvCode < 0) {
         LogHelper::log(Error, "Failed to recv reply msg");
         return recvCode;
@@ -173,7 +190,7 @@ void loopRead(int sockFd, ClientContext *ctx) {
     static char buf[65536];
     while (true) {
         memset(buf, 0, sizeof(buf));
-        ssize_t recvCode = recvMessage(sockFd, (uint8_t *)buf, sizeof(buf), ctx);
+        ssize_t recvCode = recvMessage(sockFd, (uint8_t *)buf, sizeof(buf), ctx, NULL);
         if (recvCode < 0) {
             LogHelper::log(Error, "Fail to recv msg from server, break");
             break;
@@ -183,7 +200,8 @@ void loopRead(int sockFd, ClientContext *ctx) {
     }
 }
 
-int socksHandShake(int localFd, int serverFd, ClientContext *ctx) {
+int socksHandShake(int localFd, int serverFd, ClientContext *ctx, LocalFdMap &localFdMap) {
+    LogHelper::log(Debug, "client start to socks handshake for localFd: %d", localFd);
     static uint8_t socksBuffer[sizeof(SocksTcpReply)];
     memset(socksBuffer, 0, sizeof(socksBuffer));
     int recvCode = readNBytes(localFd, socksBuffer, 2, constants::clientNonBlocking);
@@ -252,7 +270,7 @@ int socksHandShake(int localFd, int serverFd, ClientContext *ctx) {
             return recvCode;
         }
         totalLen += recvCode;
-        recvCode = readNBytes(localFd, socksBuffer + 2 + recvCode, 2);
+        recvCode = readNBytes(localFd, socksBuffer + 2 + recvCode, 2, constants::clientNonBlocking);
         if (recvCode < 0) {
             LogHelper::log(Warn, "Fail to recv dst port in the third handshake recv");
             return recvCode;
@@ -266,7 +284,7 @@ int socksHandShake(int localFd, int serverFd, ClientContext *ctx) {
             return recvCode;
         }
         totalLen += recvCode;
-        recvCode = readNBytes(localFd, socksBuffer + 1 + recvCode, 2);
+        recvCode = readNBytes(localFd, socksBuffer + 1 + recvCode, 2, constants::clientNonBlocking);
         if (recvCode < 0) {
             LogHelper::log(Warn, "Fail to recv dst port in the third handshake recv");
             return recvCode;
@@ -280,7 +298,7 @@ int socksHandShake(int localFd, int serverFd, ClientContext *ctx) {
             return recvCode;
         }
         totalLen += recvCode;
-        recvCode = readNBytes(localFd, socksBuffer + 1 + recvCode, 2);
+        recvCode = readNBytes(localFd, socksBuffer + 1 + recvCode, 2, constants::clientNonBlocking);
         if (recvCode < 0) {
             LogHelper::log(Warn, "Fail to recv dst port in the third handshake recv");
             return recvCode;
@@ -306,35 +324,95 @@ int socksHandShake(int localFd, int serverFd, ClientContext *ctx) {
         LogHelper::log(Error, "Fail to send socks handshake third request to server");
         return sendCode;
     }
-    memset(socksBuffer, 0, totalLen + 1 + sizeof(localFd));
-    int recvLen = recvMessage(serverFd, socksBuffer, sizeof(socksBuffer), ctx, 7);
-    if (recvLen < 0) {
-        LogHelper::log(Error, "Fail to recv socks handshake forth reply from server");
-        return recvLen;
-    }
-    if (recvLen < 2) {
-        LogHelper::log(Error, "Received len less than header in socks handshake forth reply from server");
-        return -3;
-    }
-    uint8_t respCode = socksBuffer[0];
-    memcpy(addrBuffer, socksBuffer + 1, recvLen - 1 - sizeof(localFd));
+    localFdMap[localFd] = LocalFdWaiting;
+    
+    return 0;
+}
+
+int readAndHandleFromServer(int serverFd, LocalFdMap &localFdMap, ClientContext *ctx, fd_set &master_set, int& max_sd) {
+    static char readBuf[constants::MAX_MSG_DATA_LENGTH];
     int tempLocalFd = 0;
-    ntoh_copy4bytes(&tempLocalFd, socksBuffer + recvLen - sizeof(localFd));
-    if (tempLocalFd != localFd) {
-        LogHelper::log(Error, "receive localFd not equals the localFd, server localFd:%d, localFd: %d", tempLocalFd, localFd);
-        return -4;
+    uint8_t msgType = 0;
+    // ssize_t recvCode = recvReplyMsg(serverFd, (uint8_t*)readBuf, sizeof(readBuf), ctx, &tempLocalFd);
+    ssize_t recvCode = recvMessage(serverFd, (uint8_t*)readBuf, sizeof(readBuf), ctx, &msgType);
+    if (recvCode < 0) {
+        LogHelper::log(Error, "fail to recv msg from the server");
+        return recvCode;
     }
-    memset(socksBuffer, 0, recvLen);
-    socksBuffer[0] = constants::SocksVersion;
-    socksBuffer[1] = respCode;
-    socksBuffer[2] = 0x00;
-    memcpy(socksBuffer + 3, addrBuffer, recvLen - 1 - sizeof(localFd));
-    sendCode = writeNBytes(localFd, socksBuffer, 3 + recvLen - 1 - sizeof(localFd));
-    if (sendCode < 0) {
-        LogHelper::log(Warn, "Fail in socks forth handshake, couldn't send reply to localFd: %d", localFd);
-        return sendCode;
+    if (msgType == SocksTrafficReplyMsg) {
+        ntoh_copy4bytes(&tempLocalFd, readBuf);
+        if (localFdMap.find(tempLocalFd) == localFdMap.end()) {
+            LogHelper::log(Warn, "Failed to recv traffic reply, localFd :%d not in localFdMap", tempLocalFd);
+            return -1;
+        }
+        if (localFdMap[tempLocalFd] != LocalFdPrepared) {
+            LogHelper::log(Warn, "Failed to recv traffic reply, localFd status: %d, not prepared", localFdMap[tempLocalFd]);
+            return -2;
+        }
+        ssize_t sendCode = writeNBytes(tempLocalFd, readBuf + sizeof(tempLocalFd), recvCode - sizeof(tempLocalFd), constants::clientNonBlocking);
+        if (sendCode < 0) {
+            LogHelper::log(Warn, "Fail to send data to localFd :%d, close it", tempLocalFd);
+            close(tempLocalFd);
+            FD_CLR(tempLocalFd, &master_set);
+            if (tempLocalFd == max_sd) {
+                while (FD_ISSET(max_sd, &master_set) == 0)
+                    max_sd -= 1;
+            }
+            localFdMap.erase(tempLocalFd);
+            return sendCode;
+        }
     }
-    LogHelper::log(Debug, "client socks handshake end");
+    else if (msgType == SocksTcpReplyMsg) {
+        // static uint8_t socksBuffer[sizeof(SocksTcpReply)];
+        // memset(socksBuffer, 0, totalLen + 1 + sizeof(localFd));
+        // TODO: modify
+        // int recvLen = recvMessage(serverFd, socksBuffer, sizeof(socksBuffer), ctx, 7);
+        // if (recvLen < 0) {
+        //     LogHelper::log(Error, "Fail to recv socks handshake forth reply from server");
+        //     return recvLen;
+        // }
+        int recvLen = recvCode;
+        if (recvLen < 2) {
+            LogHelper::log(Error, "Received len less than header in socks handshake forth reply from server");
+            return -3;
+        }
+        uint8_t respCode = readBuf[0];
+
+        int localFd = 0;
+        static uint8_t addrBuffer[constants::SocksDomainMaxLength + 2];
+        memset(addrBuffer, 0, sizeof(addrBuffer));
+        memcpy(addrBuffer, readBuf + 1, recvLen - 1 - sizeof(localFd));
+        
+        ntoh_copy4bytes(&localFd, readBuf + recvLen - sizeof(localFd));
+        // if (localFd != localFd) {
+        //     LogHelper::log(Error, "receive localFd not equals the localFd, server localFd:%d, localFd: %d", localFd, localFd);
+        //     return -4;
+        // }
+        if (localFdMap.find(localFd) == localFdMap.end()) {
+            LogHelper::log(Warn, "Failed in forth socks handshake from server, cannot find localFd: %d in localFdMap", localFd);
+            return -4;
+        }
+        if (localFdMap[localFd] != LocalFdWaiting) {
+            LogHelper::log(Warn, "Failed in forth socks handshake, localFd %d status is not waiting but %d", localFd, localFdMap[localFd]);
+            return -5;
+        }
+        localFdMap[localFd] = LocalFdPrepared;
+        memset(readBuf, 0, recvLen);
+        readBuf[0] = constants::SocksVersion;
+        readBuf[1] = respCode;
+        readBuf[2] = 0x00;
+        memcpy(readBuf + 3, addrBuffer, recvLen - 1 - sizeof(localFd));
+        int sendCode = writeNBytes(localFd, readBuf, 3 + recvLen - 1 - sizeof(localFd), constants::clientNonBlocking);
+        if (sendCode < 0) {
+            LogHelper::log(Warn, "Fail in socks forth handshake, couldn't send reply to localFd: %d", localFd);
+            return sendCode;
+        }
+        LogHelper::log(Debug, "client socks handshake end");
+    }
+    else {
+        LogHelper::log(Warn, "Unknown msgType: %d", msgType);
+        return -2;
+    }
     return 0;
 }
 
@@ -386,6 +464,8 @@ int startListen(int serverFd, ClientContext *ctx) {
     timeout.tv_sec  = 3 * 60;
     timeout.tv_usec = 0;
 
+    LocalFdMap localFdMap;
+
     bool endLoop = false;
     do {
         memcpy(&working_set, &master_set, sizeof(master_set));
@@ -423,37 +503,27 @@ int startListen(int serverFd, ClientContext *ctx) {
                         if (new_sd > max_sd)
                             max_sd = new_sd;
                         
-                        rc = socksHandShake(new_sd, serverFd, ctx);
+                        rc = socksHandShake(new_sd, serverFd, ctx, localFdMap);
                         if (rc < 0) {
-                            LogHelper::log(Error, "Failed to establish socks connection");
+                            LogHelper::log(Error, "Failed to establish socks connection, clean fd: %d", new_sd);
                             close(new_sd);
                             FD_CLR(new_sd, &master_set);
                             if (new_sd == max_sd) {
                                 while (FD_ISSET(max_sd, &master_set) == 0)
                                     max_sd -= 1;
                             }
+                            if (localFdMap.find(new_sd) != localFdMap.end()) {
+                                localFdMap.erase(new_sd);
+                            }
                         }
                     } while (new_sd != -1);
                 }
                 else if(i == serverFd) {
                     LogHelper::log(Debug, "Server Fd is readable");
-                    static char readBuf[constants::MAX_MSG_DATA_LENGTH];
-                    int tempLocalFd = 0;
-                    ssize_t recvCode = recvReplyMsg(serverFd, (uint8_t*)readBuf, sizeof(readBuf), ctx, &tempLocalFd);
-                    if (recvCode < 0) {
-                        LogHelper::log(Error, "fail to recv reply msg from the server");
-                        return recvCode;
-                    }
-                    ssize_t sendCode = writeNBytes(tempLocalFd, readBuf, recvCode, constants::clientNonBlocking);
-                    if (sendCode < 0) {
-                        LogHelper::log(Warn, "Fail to send data to localFd :%d, close it", tempLocalFd);
-                        close(tempLocalFd);
-                        FD_CLR(tempLocalFd, &master_set);
-                        if (tempLocalFd == max_sd) {
-                            while (FD_ISSET(max_sd, &master_set) == 0)
-                                max_sd -= 1;
-                        }
-                    }
+
+                    int handleRet = readAndHandleFromServer(i, localFdMap, ctx, master_set, max_sd);
+
+                    
                 }
                 else {
                     LogHelper::log(Debug, "Fd %d is ready", i);
@@ -468,7 +538,7 @@ int startListen(int serverFd, ClientContext *ctx) {
                         }
                         
                     }
-                    if (rc == 0) {
+                    else if (rc == 0) {
                         LogHelper::log(Warn, "Fd %d has been closed", i);
                         close_conn = true;
                     }
@@ -482,11 +552,15 @@ int startListen(int serverFd, ClientContext *ctx) {
                     }
 
                     if (close_conn) {
+                        LogHelper::log(Warn, "Close fd: %d", i);
                         close(i);
                         FD_CLR(i, &master_set);
                         if (i == max_sd) {
                             while (FD_ISSET(max_sd, &master_set) == 0)
                                 max_sd -= 1;
+                        }
+                        if (localFdMap.find(i) != localFdMap.end()) {
+                            localFdMap.erase(i);
                         }
                     }
                 }
@@ -502,7 +576,7 @@ int launch_client() {
     const char tempBuf[] = "Hello, test!";
     while (true) {
         ClientContext context;
-        if (SocketPlugin::getInstance()->connectSocket(serverAddrStr.c_str(),  serverListenPort) < 0 ) {
+        if (SocketPlugin::getInstance()->connectSocket(serverAddrStr.c_str(),  serverListenPort, constants::clientNonBlocking) < 0 ) {
             LogHelper::log(Error, "Client Fail to connect to server");
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             break;

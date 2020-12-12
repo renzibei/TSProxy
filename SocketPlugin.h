@@ -16,7 +16,7 @@ private:
 public:
 
     // now default interpret addr as ipv6 addr
-    int connectSocket(const char* addrStr, int port);
+    int connectSocket(const char* addrStr, int port, int isNonBlocking);
     int getSockFd();
     int closeSocket();
 

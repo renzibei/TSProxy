@@ -14,6 +14,7 @@
 #include "utils.h"
 
 #include <unordered_map>
+#include <deque>
 
 #define SERVER_PORT  constants::serverListenPort
 
@@ -37,11 +38,38 @@ struct ClientNode{
     ClientNode():cSeq(0), sSeq(0), lastTime(0) {}
 };
 
+enum HostNodeStatus {
+    HostWaiting = 0, HostReady = 1
+};
+
 struct HostNode {
     int clientFd, localFd;
-    HostNode(int clientFd, int localFd, time_t lastTime): clientFd(clientFd), localFd(localFd), lastTime(lastTime) {}
-    HostNode(): clientFd(0), localFd(0), lastTime(0) {}
     time_t lastTime;
+    // HostNodeStatus status;
+    std::deque<uint8_t> writeBuf;
+    
+    HostNode(int clientFd, int localFd, time_t lastTime): clientFd(clientFd), localFd(localFd), lastTime(lastTime) {}
+    HostNode(): clientFd(0), localFd(0), lastTime(0){}
+    
+    void writeToBuffer(const uint8_t *src, size_t nbyte) {
+        for(size_t i = 0; i < nbyte; ++i) {
+            writeBuf.push_back(src[i]);
+        }
+    }
+
+    ssize_t readFromBuffer(uint8_t *dst, size_t nbyte) {
+        size_t limit = std::min(writeBuf.size(), nbyte);
+        for(size_t i = 0; i < limit; ++i) {
+            dst[i] = writeBuf[i];
+        }
+        return limit;
+    }
+
+    void popBuffer(size_t nbyte) {
+        for(size_t i = 0; i < nbyte; ++i) {
+            writeBuf.pop_front();
+        }
+    }
 };
 
 typedef std::unordered_map<int, HostNode> HostMap; 
@@ -155,7 +183,7 @@ int recvData(int sockFd, uint8_t *dst, size_t bufferSize, ClientMap &cMap, uint8
 
 
 
-int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set &fdSet, int &max_sd) {
+int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set &readFdSet, fd_set &writeFdSet, int &max_read_sd, int &max_write_sd, int &max_all_sd) {
     static uint8_t buf[constants::MAX_MSG_DATA_LENGTH];
     memset(buf, 0, sizeof(buf));
     uint8_t msgType = 0;
@@ -164,9 +192,11 @@ int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set
         LogHelper::log(Error, "Failed to recv data from client: %d", sockFd);
         return recvLen;
     }
+    LogHelper::log(Debug, "Has recv a msg from client: %d, goning to handleit", sockFd);
     using namespace constants;
     SocketMap *l2hMap = &(cMap[sockFd]->sMap);
     if (msgType == constants::SocksTcpRequestMsg) {
+        LogHelper::log(Debug, "it's a tcp request msg");
         static char dstAddrBuf[SocksDomainMaxLength];
         memset(dstAddrBuf, 0, sizeof(dstAddrBuf));
         uint8_t respCode = 0x00;
@@ -231,8 +261,10 @@ int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set
 
             if (respCode == 0x00) {
                 
+                LogHelper::log(Debug, "begin to try to connect socket to host");
                 
                 int hostSd = tryConnectSocket(dstAddrBuf, dstPort, constants::serverNonBlocking);
+                LogHelper::log(Debug, "try end");
                 if (hostSd < 0) {
                     respCode = 0xff;
                 }
@@ -240,10 +272,15 @@ int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set
                     time_t nowT = time(NULL);
                     (*l2hMap)[localFd] = SocketNode(hostSd, nowT);
                     h2lMap[hostSd] = HostNode(sockFd, localFd, nowT);
-                    FD_SET(hostSd, &fdSet);
-                    if (hostSd > max_sd) {
-                        max_sd = hostSd;
+                    FD_SET(hostSd, &readFdSet);
+                    if (hostSd > max_read_sd) {
+                        max_read_sd = hostSd;
                     }
+                    FD_SET(hostSd, &writeFdSet);
+                    if (hostSd > max_write_sd) {
+                        max_write_sd = hostSd;
+                    }
+                    max_all_sd = std::max(max_read_sd, max_write_sd);
                     LogHelper::log(Debug, "Add hostFd :%d", hostSd);
 
                 }
@@ -254,6 +291,8 @@ int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set
         else {
             respCode = 0xff;
         }
+
+        
 
         static uint8_t replyMsgBuf[MAX_MSG_DATA_LENGTH];
         memset(replyMsgBuf, 0, sizeof(replyMsgBuf));
@@ -269,9 +308,12 @@ int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set
             LogHelper::log(Error, "Failed to send socks forth handshake reply from server");
             return sendCode;
         }
+        
+        
     }
     else if (msgType == SocksTrafficRequestMsg) {
-        
+        LogHelper::log(Debug, "it's a traffic request msg");
+
         int localFd = -1;
         if (recvLen < sizeof(localFd)) {
             LogHelper::log(Error, "Fail to receive socks traffic request, length less than localFd");
@@ -284,27 +326,28 @@ int recvAndHandleClientData(int sockFd, ClientMap &cMap, HostMap &h2lMap, fd_set
             return -6;
         }
         int hostSd = (*l2hMap)[localFd].sockFd;
-        ssize_t sendCode = writeNBytes(hostSd, buf + sizeof(localFd), recvLen - sizeof(localFd), constants::serverNonBlocking);
-        if (sendCode < 0) {
-            LogHelper::log(Warn, "Failed to send data to host, localFd: %d, will close hostSd", localFd);
-            close(hostSd);
-            FD_CLR(hostSd, &fdSet);
-            if (hostSd == max_sd) {
-                while (FD_ISSET(max_sd, &fdSet) == 0)
-                    max_sd -= 1;
-            }
-            l2hMap->erase(localFd);
-            h2lMap.erase(hostSd);
-            return -7;
-        }
-        LogHelper::log(Debug, "End Send %d bytes to host: %d, content: ",recvLen - sizeof(localFd), hostSd);
-        for (int k = 0; k < recvLen - sizeof(localFd); ++k) {
-            fprintf(stderr, "%c", buf[sizeof(localFd) + k]);
-        }
-        fprintf(stderr, "\n");
+        h2lMap[hostSd].writeToBuffer(buf + sizeof(localFd), recvLen - sizeof(localFd));
+        // ssize_t sendCode = writeNBytes(hostSd, buf + sizeof(localFd), recvLen - sizeof(localFd), constants::serverNonBlocking);
+        // if (sendCode < 0) {
+        //     LogHelper::log(Warn, "Failed to send data to host, localFd: %d, will close hostSd", localFd);
+        //     close(hostSd);
+        //     FD_CLR(hostSd, &readFdSet);
+        //     if (hostSd == max_read_sd) {
+        //         while (FD_ISSET(max_read_sd, &readFdSet) == 0)
+        //             max_read_sd -= 1;
+        //     }
+        //     l2hMap->erase(localFd);
+        //     h2lMap.erase(hostSd);
+        //     return -7;
+        // }
+        LogHelper::log(Debug, "End Send %d bytes to host: %d",recvLen - sizeof(localFd), hostSd);
+        // for (int k = 0; k < recvLen - sizeof(localFd); ++k) {
+        //     fprintf(stderr, "%c", buf[sizeof(localFd) + k]);
+        // }
+        // fprintf(stderr, "\n");
         time_t nowT = time(NULL);
         l2hIt->second.lastTime = nowT;
-        h2lMap[hostSd].lastTime = nowT;
+        // h2lMap[hostSd].lastTime = nowT;
     }
     else if (msgType == DebugC2SMsg) {
         LogHelper::log(Debug, "Received Debug C2S msg: %s", buf);
@@ -359,13 +402,13 @@ void cleanDeadClients(ClientMap &cMap) {
 int launch_server()
 {
    int    i, len, rc, on = 1;
-   int    listen_sd, max_sd, new_sd;
+   int    listen_sd, max_read_sd, new_sd, max_write_sd, max_all_sd;
    int    desc_ready, end_server = FALSE;
    int    close_conn;
    char   buffer[80];
    struct sockaddr_in6 addr;
    struct timeval      timeout;
-   fd_set              master_set, working_set;
+   fd_set              master_set, working_set, write_src_set, temp_write_set;
 
    /*************************************************************/
    /* Create an AF_INET6 stream socket to receive incoming      */
@@ -430,8 +473,12 @@ int launch_server()
     /* Initialize the master fd_set                              */
     /*************************************************************/
     FD_ZERO(&master_set);
-    max_sd = listen_sd;
+    max_read_sd = listen_sd;
     FD_SET(listen_sd, &master_set);
+
+    FD_ZERO(&write_src_set);
+    max_write_sd = 0;
+    max_all_sd = max_read_sd;
 
     /*************************************************************/
     /* Initialize the timeval struct to 3 minutes.  If no        */
@@ -452,12 +499,13 @@ int launch_server()
         /* Copy the master fd_set over to the working fd_set.     */
         /**********************************************************/
         memcpy(&working_set, &master_set, sizeof(master_set));
+        memcpy(&temp_write_set, &write_src_set, sizeof(write_src_set));
 
         /**********************************************************/
         /* Call select() and wait 3 minutes for it to complete.   */
         /**********************************************************/
         printf("Waiting on select()...\n");
-        rc = select(max_sd + 1, &working_set, NULL, NULL, &timeout);
+        rc = select(max_all_sd + 1, &working_set, &temp_write_set, NULL, &timeout);
 
         /**********************************************************/
         /* Check to see if the select call failed.                */
@@ -483,7 +531,7 @@ int launch_server()
         /* determine which ones they are.                         */
         /**********************************************************/
         desc_ready = rc;
-        for (i=0; i <= max_sd  &&  desc_ready > 0; ++i)
+        for (i=0; i <= max_all_sd  &&  desc_ready > 0; ++i)
         {
             /*******************************************************/
             /* Check to see if this descriptor is ready            */
@@ -541,8 +589,10 @@ int launch_server()
                         /**********************************************/
                         printf("  New incoming connection - %d\n", new_sd);
                         FD_SET(new_sd, &master_set);
-                        if (new_sd > max_sd)
-                            max_sd = new_sd;
+                        if (new_sd > max_read_sd)
+                            max_read_sd = new_sd;
+                        if (new_sd > max_all_sd)
+                            max_all_sd = new_sd;
                         
                         rc = serverHandShake(new_sd, clientMap);
                         if (rc < 0) {
@@ -551,11 +601,12 @@ int launch_server()
                             FD_CLR(new_sd, &master_set);
                             delete clientMap[new_sd];
                             clientMap.erase(new_sd);
-                            if (new_sd == max_sd)
+                            if (new_sd == max_read_sd)
                             {
-                                while (FD_ISSET(max_sd, &master_set) == FALSE)
-                                max_sd -= 1;
+                                while (FD_ISSET(max_read_sd, &master_set) == FALSE)
+                                max_read_sd -= 1;
                             }
+                            max_all_sd = std::max(max_read_sd, max_write_sd);
                         }
                         /**********************************************/
                         /* Loop back up and accept another incoming   */
@@ -594,7 +645,7 @@ int launch_server()
                         // static char readBuf[65536];
                         // memset(readBuf, 0, sizeof(readBuf));
                         // rc = recvData(i, (uint8_t *)readBuf, sizeof(readBuf), clientMap);
-                        rc = recvAndHandleClientData(i, clientMap, h2lMap, master_set, max_sd);
+                        rc = recvAndHandleClientData(i, clientMap, h2lMap, master_set, write_src_set, max_read_sd, max_write_sd, max_all_sd);
                         if (rc < 0)
                         {
                             // #ifdef NON_BLOCKING
@@ -671,17 +722,19 @@ int launch_server()
                         FD_CLR(i, &master_set);
                         delete clientMap[i];
                         clientMap.erase(i);
-                        if (i == max_sd)
+                        if (i == max_read_sd)
                         {
-                            while (FD_ISSET(max_sd, &master_set) == FALSE)
-                            max_sd -= 1;
+                            while (FD_ISSET(max_read_sd, &master_set) == FALSE)
+                                max_read_sd -= 1;
+                            max_all_sd = std::max(max_read_sd, max_write_sd);
                         }
+        
                     }
                 }
                 else if(h2lMap.find(i) != h2lMap.end()) {
                     bool shouldCloseHost = false, shouldCloseClient = false;
                     int clientSd = h2lMap[i].clientFd, localFd = h2lMap[i].localFd;
-                    static uint8_t readBuf[constants::AES_MAX_DATA_LENGTH];
+                    static uint8_t readBuf[constants::AES_MAX_DATA_LENGTH - 36];
                     memset(readBuf, 0, sizeof(readBuf));
                     hton_copy4bytes(readBuf, &localFd);
                     rc = recv(i, readBuf + sizeof(localFd), sizeof(readBuf) - sizeof(localFd), 0);
@@ -708,18 +761,27 @@ int launch_server()
                     if (shouldCloseHost) {
                         close(i);
                         FD_CLR(i, &master_set);
-                        if (i == max_sd) {
-                            while (FD_ISSET(max_sd, &master_set) == 0)
-                                max_sd -= 1;
+                        if (i == max_read_sd) {
+                            while (FD_ISSET(max_read_sd, &master_set) == 0)
+                                max_read_sd -= 1;
+                            max_all_sd = std::max(max_read_sd, max_write_sd);    
+                        }
+
+                        FD_CLR(i, &write_src_set);
+                        if (i == max_write_sd) {
+                            while (FD_ISSET(max_write_sd, &write_src_set) == 0)
+                                max_write_sd -= 1;
+                            max_all_sd = std::max(max_read_sd, max_write_sd);    
                         }
                     }
                     if (shouldCloseClient) {
                         close(clientSd);
                         FD_CLR(clientSd, &master_set);
-                        if (clientSd == max_sd) {
-                            while (FD_ISSET(max_sd, &master_set) == 0)
-                                max_sd -= 1;
+                        if (clientSd == max_read_sd) {
+                            while (FD_ISSET(max_read_sd, &master_set) == 0)
+                                max_read_sd -= 1;
                         }
+                        max_all_sd = std::max(max_read_sd, max_write_sd);
                     }
                 }
                 else {
@@ -727,6 +789,57 @@ int launch_server()
                 }
                  /* End of existing connection is readable */
             } /* End of if (FD_ISSET(i, &working_set)) */
+
+            if (FD_ISSET(i, &temp_write_set)) {
+                
+                LogHelper::log(Debug, "fd : %d is writable", i);
+
+                desc_ready--;
+                bool shouldClose = false;
+                if (h2lMap.find(i) != h2lMap.end()) {
+                    if (h2lMap[i].writeBuf.size() > 0) {
+                        static uint8_t writeBuf[constants::PACKET_BUFFER_SIZE];
+                        memset(writeBuf, 0, sizeof(writeBuf));
+                        ssize_t writeLen = h2lMap[i].readFromBuffer(writeBuf, sizeof(writeBuf));
+                        int sendLen = send(i, writeBuf, writeLen, 0);
+                        if (sendLen < 0) {
+                            if (errno != EAGAIN) {
+                                LogHelper::log(Warn, "Failed to send data to host: %d", i);
+                                shouldClose = true;
+                            }
+                        }
+                        else if (sendLen > 0) {
+                            h2lMap[i].popBuffer(sendLen);
+                            LogHelper::log(Debug, "Send :%d bytes to host: %d", sendLen, i);
+                        }
+                    }
+                }
+                else {
+                    LogHelper::log(Error, "Not know write host_fd, %d", i);
+                    shouldClose = true;
+                }
+
+                if (shouldClose) {
+                    LogHelper::log(Debug, "Close host fd: %d", i);
+                    close(i);
+                    FD_CLR(i, &write_src_set);
+                    if (i == max_write_sd) {
+                        while (FD_ISSET(max_write_sd, &write_src_set) == 0)
+                            max_write_sd -= 1;
+                        max_all_sd = std::max(max_read_sd, max_write_sd);    
+                    }
+                    FD_CLR(i, &master_set);
+                    if (i == max_read_sd) {
+                        while (FD_ISSET(max_read_sd, &master_set) == 0)
+                            max_read_sd -= 1;
+                        max_all_sd = std::max(max_read_sd, max_write_sd);    
+                    }
+                    
+                    int localFd = h2lMap[i].localFd, clientFd = h2lMap[i].clientFd;
+                    clientMap[clientFd]->sMap.erase(localFd);
+                    h2lMap.erase(i);
+                }
+            }
         } /* End of loop through selectable descriptors */
 
         cleanDeadClients(clientMap);
@@ -737,9 +850,13 @@ int launch_server()
     /*************************************************************/
     /* Clean up all of the sockets that are open                 */
     /*************************************************************/
-    for (i=0; i <= max_sd; ++i)
+    for (i=0; i <= max_read_sd; ++i)
     {
         if (FD_ISSET(i, &master_set))
+            close(i);
+    }
+    for (int i = 0; i <= max_write_sd; ++i) {
+        if (FD_ISSET(i, &write_src_set))
             close(i);
     }
     return 0;

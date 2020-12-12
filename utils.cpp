@@ -53,13 +53,25 @@ int tryConnectSocket(const char *addrStr, uint16_t port, int isNonBlocking) {
             continue;
         }
 
+        if (isNonBlocking) {
+            int status = fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+            if (status < 0) {
+                LogHelper::log(Warn, "Fail to set non-blocking, %s", strerror(errno));
+                cause = "cannot nonblocking";
+                continue;
+            }
+        }
         
 
         if (connect(s, res->ai_addr, res->ai_addrlen) < 0) {
-            cause = "connect";
-            close(s);
-            s = -1;
-            continue;
+            if (errno != EINPROGRESS) {
+                cause = "connect";
+                close(s);
+                s = -1;
+                continue;
+            }
+            
+
         }
 
         static char addrS[constants::SocksDomainMaxLength];
@@ -81,13 +93,7 @@ int tryConnectSocket(const char *addrStr, uint16_t port, int isNonBlocking) {
             /*NOTREACHED*/
     }
     freeaddrinfo(res0);
-    if (isNonBlocking) {
-        int status = fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
-        if (status < 0) {
-            LogHelper::log(Warn, "Fail to set non-blocking, %s", strerror(errno));
-            return -3;
-        }
-    }
+    
     return s;
 }
 
