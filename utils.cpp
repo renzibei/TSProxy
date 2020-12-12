@@ -9,36 +9,175 @@
 
 #include <stdlib.h>
 #include <time.h>
+#include <thread>
+#include <chrono>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <fcntl.h>
+
+
 
 
 using namespace constants;
 
-ssize_t readNBytes(int fd, void *buf, size_t nbyte) {
+int tryConnectSocket(const char *addrStr, uint16_t port, int isNonBlocking) {
+    struct addrinfo hints, *res, *res0;
+    int error;
+    int s;
+    // const char *cause = NULL;
+    std::string cause;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = PF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    // hints.ai_protocol = IPPROTO_TCP;
+    char portStr[8] = {0};
+    sprintf(portStr, "%u", port); 
+
+    error = getaddrinfo(addrStr, portStr, &hints, &res0);
+    if (error) {
+            // errx(1, "%s", gai_strerror(error));
+        LogHelper::log(Warn, "Fail to get addr info: %s", gai_strerror(error));
+        return -1;
+            /*NOTREACHED*/
+    }
+    s = -1;
+    for (res = res0; res; res = res->ai_next) {
+        s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (s < 0) {
+            cause = "socket";
+            continue;
+        }
+
+        
+
+        if (connect(s, res->ai_addr, res->ai_addrlen) < 0) {
+            cause = "connect";
+            close(s);
+            s = -1;
+            continue;
+        }
+
+        static char addrS[constants::SocksDomainMaxLength];
+        memset(addrS, 0, constants::SocksDomainMaxLength);
+        const char* ss = inet_ntop(res->ai_family, &(((struct sockaddr_in *)(res->ai_addr))->sin_addr.s_addr), addrS, sizeof(addrS));
+        if (ss == NULL) {
+            LogHelper::log(Error, "Fail to convrt ntop");
+        }
+        else {
+            LogHelper::log(Error, "Family: %d solve %s ip as %s , port %s; INET family: %d", res->ai_family, addrStr, addrS, portStr, AF_INET);
+        }
+
+        break;  /* okay we got one */
+    }
+    if (s < 0) {
+        LogHelper::log(Warn, "Tried all the ip, non connection could be established, cause: %s", cause.c_str());
+        return -2;
+            // err(1, "%s", cause);
+            /*NOTREACHED*/
+    }
+    freeaddrinfo(res0);
+    if (isNonBlocking) {
+        int status = fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+        if (status < 0) {
+            LogHelper::log(Warn, "Fail to set non-blocking, %s", strerror(errno));
+            return -3;
+        }
+    }
+    return s;
+}
+
+int make_socket(uint16_t port, int on, int bindToLoopback)
+{
+    int sock;
+    struct sockaddr_in6 name;
+
+    /* Create the socket. */    
+    sock = socket(AF_INET6, SOCK_STREAM, 0);
+    if (sock < 0)
+    {
+        LogHelper::log(Error, "failed to create socket, %s", strerror(errno));
+        return -1;
+    }
+
+    // set reuseable
+    int rc = setsockopt(sock, SOL_SOCKET,  SO_REUSEADDR,
+                   (char *)&on, sizeof(on));
+    if (rc < 0)
+    {
+        LogHelper::log(Error, "setsockopt() failed, %s", strerror(errno));
+        close(sock);
+        return -2;
+    }
+
+    /* Give the socket a name. */
+    memset(&name, 0, sizeof(name));
+    name.sin6_family = AF_INET6;
+    name.sin6_port = htons (port);
+    //   name.sin6_addr.s_addr = htonl (INADDR_ANY);
+    
+    if (bindToLoopback)
+        memcpy(&name.sin6_addr, &in6addr_loopback, sizeof(in6addr_loopback));
+    else
+        memcpy(&name.sin6_addr, &in6addr_any, sizeof(in6addr_any));
+
+    if (bind (sock, (struct sockaddr *) &name, sizeof (name)) < 0)
+    {
+        LogHelper::log(Error, "Failed to bind, %s", strerror(errno));
+        return -3;
+    }
+
+    return sock;
+}
+
+ssize_t readNBytes(int fd, void *buf, size_t nbyte, int isNonBlocking) {
     size_t hasRead = 0;
     char* dest = (char*)buf;
     while(hasRead < nbyte) {
-        ssize_t tempLen = read(fd, dest + hasRead, nbyte - hasRead);
+        ssize_t tempLen = recv(fd, dest + hasRead, nbyte - hasRead, 0);
         if(tempLen < 0) {
+            if (isNonBlocking && errno == EAGAIN) {
+                continue;
+            }
             LogHelper::log(Error, "Error happens when read fd , errno: %d %s", errno, strerror(errno));
             return -1;
         }
+        if(isNonBlocking && tempLen == 0) {
+            LogHelper::log(Error, "Connection has been closed in sockFd %d when tried to recv", fd);
+            return hasRead;
+        }
         hasRead += tempLen;
+        
     }
-    return 0;
+    
+    return hasRead;
 }
 
-ssize_t writeNBytes(int fd, const void *buf, size_t nbyte) {
+ssize_t writeNBytes(int fd, const void *buf, size_t nbyte, int isNonBlocking) {
     size_t hasWritten = 0;
     const char* src = (const char*)buf;
+    
+
     while(hasWritten < nbyte) {
-        ssize_t tempLen = write(fd, src + hasWritten, nbyte - hasWritten);
+        ssize_t tempLen = send(fd, src + hasWritten, nbyte - hasWritten, 0);
         if(tempLen < 0) {
+            if (isNonBlocking && errno == EAGAIN) {
+                continue;
+            }
             LogHelper::log(Error, "Errors when write fd, %s", strerror(errno));
             return -1;
         }
+        if (isNonBlocking && tempLen == 0) {
+            LogHelper::log(Error, "Connection has been closed in sockFd %d when tried to send", fd);
+            return hasWritten;
+        }
         hasWritten += tempLen;
     }
-    return 0;
+    return hasWritten;
 }
 
 int disAssembleInnerMsg(InnerMsg *msg ,const uint8_t *src_data, size_t nbyte) {
@@ -163,7 +302,7 @@ ssize_t assembleTSPacket(uint8_t *dst, size_t buffer_size, const TSPacket *src_p
     return dst - old_dst;
 }
 
-ssize_t sendTSPacket(int fd, const InnerMsg *msg) {
+ssize_t sendTSPacket(int fd, const InnerMsg *msg, int isNonBlocking) {
     static TSPacket packetStruct;
     // static InnerMsg msgStruct;
     memset(&packetStruct, 0, sizeof(TSPacket));
@@ -221,14 +360,14 @@ ssize_t sendTSPacket(int fd, const InnerMsg *msg) {
     }
     // size_t dataLen = assembleTSPacket(packetBuffer, &packetStruct);
     LogHelper::log(Debug, "sockFd: %d start to write %d bytes", fd, dataLen);
-    return writeNBytes(fd, packetBuffer, dataLen);
+    return writeNBytes(fd, packetBuffer, dataLen, isNonBlocking);
 }
 
-ssize_t recvTSPacket(int fd, InnerMsg *msg) {
+ssize_t recvTSPacket(int fd, InnerMsg *msg, int isNonBlocking) {
     static uint8_t packetBuffer[PACKET_BUFFER_SIZE];
     LogHelper::log(Debug, "sockFd: %d start to read 5bytes", fd);
-    ssize_t readRet = readNBytes(fd, packetBuffer, 5);
-    if (readRet != 0) {
+    ssize_t readRet = readNBytes(fd, packetBuffer, 5, isNonBlocking);
+    if (readRet < 0) {
         return readRet;
     }
     uint8_t tsContentType = *packetBuffer;
@@ -246,8 +385,8 @@ ssize_t recvTSPacket(int fd, InnerMsg *msg) {
 
     ntoh_copy2bytes(&(msgLen), packetBuffer + 3);
     LogHelper::log(Debug, "sockFd: %d start to read %d bytes", fd, msgLen);
-    readRet = readNBytes(fd, packetBuffer + 5, msgLen);
-    if (readRet != 0) {
+    readRet = readNBytes(fd, packetBuffer + 5, msgLen, isNonBlocking);
+    if (readRet < 0) {
         return readRet;
     }
     static TSPacket packetStruct;

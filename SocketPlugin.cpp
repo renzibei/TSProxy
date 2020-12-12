@@ -26,13 +26,14 @@ int SocketPlugin::connectSocket(const char *addrStr, int port) {
     int useIpv6 = false;
 
     if(convert6Code == 0) {
-        dest4.sin_addr.s_addr = inet_addr(addrStr);
+        // dest4.sin_addr.s_addr = inet_addr(addrStr);
+        // int convert4Code = inet_pton(AF_INET, addrStr, &dest4.sin_addr);
         destPtr = (struct sockaddr*) &dest4;
         destSize = sizeof(dest4);
-        // if( inet_pton(AF_INET, addrStr, &dest4.sin_addr) != 1) {
-        //     LogHelper::log(Error, "Fail to convert ipv4 Address, %s", strerror(errno));
-        //     return -1;
-        // }
+        if( inet_pton(AF_INET, addrStr, &dest4.sin_addr) != 1) {
+            LogHelper::log(Error, "Fail to convert ipv4 Address, %s", strerror(errno));
+            return -1;
+        }
         // else {
         //     destPtr = (struct sockaddr*) &dest4;
         //     destSize = sizeof(dest4);
