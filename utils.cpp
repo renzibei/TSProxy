@@ -81,7 +81,7 @@ int tryConnectSocket(const char *addrStr, uint16_t port, int isNonBlocking) {
             LogHelper::log(Error, "Fail to convrt ntop");
         }
         else {
-            LogHelper::log(Error, "Family: %d solve %s ip as %s , port %s; INET family: %d", res->ai_family, addrStr, addrS, portStr, AF_INET);
+            LogHelper::log(Debug, "Family: %d solve %s ip as %s , port %s; INET family: %d", res->ai_family, addrStr, addrS, portStr, AF_INET);
         }
 
         break;  /* okay we got one */
@@ -174,7 +174,7 @@ ssize_t writeNBytes(int fd, const void *buf, size_t nbyte, int isNonBlocking) {
             if (isNonBlocking && errno == EAGAIN) {
                 continue;
             }
-            LogHelper::log(Error, "Errors when write fd, %s", strerror(errno));
+            LogHelper::log(Error, "Errors when write fd, fd: %d, %s", fd, strerror(errno));
             return -1;
         }
         if (isNonBlocking && tempLen == 0) {

@@ -16,9 +16,18 @@ void LogHelper::log(LogType type, const char * format, ...) {
 #endif
     {
         va_list args;
+        if (type == Error) {
+            fprintf(stderr, "\033[40;31m");
+        }
+        else if (type == Warn) {
+            fprintf(stderr, "\033[40;33m");
+        }
         va_start(args, format);
         vfprintf(stderr, format, args);
         va_end(args);
+        if (type == Error || type == Warn) {
+            fprintf(stderr, "\033[0m");
+        }
         fprintf(stderr, "\n");
     }
 }

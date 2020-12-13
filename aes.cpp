@@ -514,12 +514,14 @@ int decode(char *dst, int dst_size, const char *src, int src_size, const char (&
 	// 校对
 	for(j=0; j<16; j++){
 		if(result[j] != mac[j]){
-			printf("mac error!\n");
+			// printf("mac error!\n");
+			LogHelper::log(Warn, "mac check error");
 			// exit(0);
 			return -3;
 		}
 	}
-	printf("mac check ok\n");
+	// printf("mac check ok\n");
+	LogHelper::log(Debug, "mac check ok");
 
 	char ctr[16];
 	// 解密 len/16 组数据，得到数据
@@ -534,7 +536,8 @@ int decode(char *dst, int dst_size, const char *src, int src_size, const char (&
 			dst[(i << 4) + j] = dst[(i << 4) + j] ^ ctr[j];
 		}
 	}
-	printf("finish decode\n");
+	// printf("finish decode\n");
+	
 	return 0;
 }
 

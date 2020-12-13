@@ -465,7 +465,7 @@ int startListen(int serverFd, ClientContext *ctx) {
     timeout.tv_usec = 0;
 
     LocalFdMap localFdMap;
-
+    LogHelper::log(Info, "Begin loop");
     bool endLoop = false;
     do {
         memcpy(&working_set, &master_set, sizeof(master_set));
@@ -573,6 +573,9 @@ int startListen(int serverFd, ClientContext *ctx) {
 }
 
 int launch_client() {
+
+    // ignore signal
+    signal(SIGPIPE, SIG_IGN);
     const char tempBuf[] = "Hello, test!";
     while (true) {
         ClientContext context;

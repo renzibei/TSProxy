@@ -1,7 +1,7 @@
 #ifndef LOGHELPER_H
 #define LOGHELPER_H
 
-#define LOG_TRACE
+#define LOG_INFO
 
 enum  LogType{Error, Warn, Info, Debug, Trace};
 
