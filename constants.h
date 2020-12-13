@@ -7,6 +7,7 @@
 namespace constants {
 
     const std::string serverAddrStr = "127.0.0.1";
+    // const std::string serverAddrStr = "192.168.1.102";
     const int serverListenPort = 20443;
 
     const std::string clientAddrStr = "127.0.0.1";

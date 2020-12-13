@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <assert.h>
+#include <signal.h>
 
 #include <unordered_map>
 
@@ -528,7 +529,7 @@ int startListen(int serverFd, ClientContext *ctx) {
                 else {
                     LogHelper::log(Debug, "Fd %d is ready", i);
                     bool close_conn = false;
-                    static char readBuf2[constants::AES_MAX_DATA_LENGTH - 4];
+                    static char readBuf2[constants::AES_MAX_DATA_LENGTH - 72];
                     memset(readBuf2, 0, sizeof(readBuf2));
                     rc = recv(i, readBuf2, sizeof(readBuf2), 0);
                     if (rc < 0) {

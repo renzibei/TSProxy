@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
 #include "proxyserver.h"
 #include "constants.h"
 #include "utils.h"
