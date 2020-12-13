@@ -4,7 +4,7 @@ TSProxy is a pair of socks5 proxy server and client with encrypted tunnel.
 
 ## Compile
 
-This program has been tested on ubuntu 16.04 and macOS 10.15;
+This program has been tested on macOS 10.15 and ubuntu 16.04
 
 On ubuntu, first install `libuuid` by run
 
@@ -12,10 +12,10 @@ On ubuntu, first install `libuuid` by run
 sudo apt install uuid-dev
 ```
 
-Just run
+Just run the below command to compile
 
 ```shell
-make -j4
+make -j8
 ```
 
 ## Options
@@ -46,6 +46,6 @@ We use AES encryption and simply disguise network packets as TLS datagrams.
 
 ## TODO
 
-- [ ] Use a config file like ymal or json
-- [ ] Totaly diguise the protocol as TLS
+- [ ] Use a config file like yaml or json
+- [ ] Totaly diguise the behavior as TLS
 
